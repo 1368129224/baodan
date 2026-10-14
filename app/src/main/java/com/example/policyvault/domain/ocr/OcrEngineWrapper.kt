@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.RectF
 import com.example.policyvault.data.model.OcrBlock
+import com.example.policyvault.domain.util.ChineseConverter
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
@@ -55,8 +56,10 @@ class OcrEngineWrapper {
 
         for (textBlock in visionText.textBlocks) {
             for (line in textBlock.lines) {
-                val lineText = line.text.trim()
-                if (lineText.isEmpty()) continue
+                val rawLineText = line.text.trim()
+                if (rawLineText.isEmpty()) continue
+                // 全局繁体转简体（修复 ML Kit 常输出的“贏”、“紅”、“費”、“險”等繁体字）
+                val lineText = ChineseConverter.toSimplified(rawLineText)
 
                 // 如果该行包含多个被空格或列分隔的元素（例如表格同行“投保人   张明远”）：
                 // 同时保留各元素独立块（便于高亮框点选与空间邻近对齐）与完整行文本
@@ -73,7 +76,8 @@ class OcrEngineWrapper {
                     )
                     // 加入细粒度元素块（便于用户在分屏画布精准点选）
                     for (element in line.elements) {
-                        val elText = element.text.trim()
+                        val rawElText = element.text.trim()
+                        val elText = ChineseConverter.toSimplified(rawElText)
                         if (elText.isNotEmpty() && elText != ":" && elText != "：" && elText != lineText) {
                             blocks.add(
                                 OcrBlock(

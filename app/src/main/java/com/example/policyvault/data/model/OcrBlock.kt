@@ -15,5 +15,5 @@ data class OcrBlock(
     val pageIndex: Int,
     val text: String,
     val normRect: RectF,
-    val confidence: Float
+    val confidence: Float = 0.95f
 )

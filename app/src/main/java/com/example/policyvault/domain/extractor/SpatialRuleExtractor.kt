@@ -1,6 +1,7 @@
 package com.example.policyvault.domain.extractor
 
 import com.example.policyvault.data.model.*
+import com.example.policyvault.domain.util.ChineseConverter
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -189,11 +190,14 @@ class SpatialRuleExtractor {
 
     /**
      * 智能组装完整产品名称：
-     * 1. 修复常见 OCR 错别字（如“复屋”->“复星”，“呈海”->“星海”）
-     * 2. 自动检测并拼接下方跨行的分红/计划类型（如“（分红型）（计划一）”）
+     * 1. 繁体转简体（如“贏”->“赢”，“紅”->“红”）
+     * 2. 修复常见 OCR 错别字（如“复屋”->“复星”，“呈海”->“星海”）
+     * 3. 自动检测并拼接下方跨行的分红/计划类型（如“（分红型）（计划一）”）
+     * 4. 修复经典险种罕见字漏字（如“青版”->“青鸾版”）
+     * 5. 规范化为中文标准全角括号
      */
     private fun assembleFullProductName(rawName: String, primaryBlock: OcrBlock, allBlocks: List<OcrBlock>): ExtractedField {
-        var corrected = rawName
+        var corrected = ChineseConverter.toSimplified(rawName)
             .replace("复屋", "复星")
             .replace("呈海", "星海")
             .replace("呈期", "星期")
@@ -212,11 +216,25 @@ class SpatialRuleExtractor {
             }
 
         if (nextLine != null) {
-            val subText = nextLine.text.trim()
+            val subText = ChineseConverter.toSimplified(nextLine.text.trim())
             if (!corrected.contains(subText)) {
                 corrected += subText
             }
         }
+
+        // 知名保司经典险种错别字与漏字修复（如“星海赢家青鸾版”）
+        if (corrected.contains("星海赢家") && corrected.contains("青版") && !corrected.contains("青鸾版")) {
+            corrected = corrected.replace("青版", "青鸾版")
+        }
+        if (corrected.contains("星海赢家") && corrected.contains("火版") && !corrected.contains("火凤版")) {
+            corrected = corrected.replace("火版", "火凤版")
+        }
+        if (corrected.contains("星海赢家") && corrected.contains("龙版") && !corrected.contains("龙腾版")) {
+            corrected = corrected.replace("龙版", "龙腾版")
+        }
+
+        // 标准化括号为全角中文括号（符合中国保单国家标准排版）
+        corrected = corrected.replace("(", "（").replace(")", "）")
 
         return ExtractedField(corrected, ConfidenceLevel.HIGH, primaryBlock.id, primaryBlock.pageIndex)
     }
@@ -294,14 +312,19 @@ class SpatialRuleExtractor {
      */
     private fun findSpatialNeighbors(anchor: OcrBlock, allBlocks: List<OcrBlock>): List<OcrBlock> {
         val rKey = anchor.normRect
-        val hKey = max(rKey.height(), 0.01f)
-        val wKey = max(rKey.width(), 0.02f)
+        val hKey = max(rKey.bottom - rKey.top, 0.01f)
+        val wKey = max(rKey.right - rKey.left, 0.02f)
+        val rKeyCenterY = (rKey.top + rKey.bottom) / 2f
+        val rKeyCenterX = (rKey.left + rKey.right) / 2f
 
         return allBlocks
             .filter { it.pageIndex == anchor.pageIndex && it.id != anchor.id }
             .mapNotNull { cand ->
                 val rCand = cand.normRect
-                val dyCenter = abs(rCand.centerY() - rKey.centerY())
+                val rCandCenterY = (rCand.top + rCand.bottom) / 2f
+                val rCandCenterX = (rCand.left + rCand.right) / 2f
+
+                val dyCenter = abs(rCandCenterY - rKeyCenterY)
                 val dxRight = rCand.left - rKey.right
 
                 // 1. 同行右侧邻居（Key-Value 键值对，例如 “投保人：曾治钞”）
@@ -309,7 +332,7 @@ class SpatialRuleExtractor {
 
                 // 2. 垂直下方邻居（表格列单元格，例如 “(基本)保险金额” 下方的 “7,576.50元”）
                 val dyBottom = rCand.top - rKey.bottom
-                val dxCenter = abs(rCand.centerX() - rKey.centerX())
+                val dxCenter = abs(rCandCenterX - rKeyCenterX)
                 val horizontalOverlap = minOf(rCand.right, rKey.right) - maxOf(rCand.left, rKey.left)
 
                 // 宽松表格对齐：垂直距离允许在 0.18f (约280px) 内，且水平有重叠或中心偏差不超过列宽

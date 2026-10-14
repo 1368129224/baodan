@@ -18,7 +18,7 @@ import kotlin.math.roundToInt
 class PdfProcessor(private val context: Context) {
 
     companion object {
-        const val TARGET_LONG_EDGE = 1600f   // 黄金分辨率：长边固定 1600px，保证 OCR 高精度
+        const val TARGET_LONG_EDGE = 2400f   // 高清分辨率：长边提升至 2400px，确保复杂汉字（如“鸾”、“赢”）笔画清晰可辨
     }
 
     /**
