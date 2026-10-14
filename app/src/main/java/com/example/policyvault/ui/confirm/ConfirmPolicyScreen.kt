@@ -89,6 +89,46 @@ fun ConfirmPolicyScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8FAFC))) {
+        // ==================== 顶部导航栏：页面快速切换与取消 ====================
+        Surface(
+            color = Color(0xFF0F172A),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState())
+                ) {
+                    pageBitmaps.indices.forEach { idx ->
+                        val labelText = pageLabels.getOrNull(idx) ?: "第${idx + 1}页"
+                        FilterChip(
+                            selected = currentPageIndex == idx,
+                            onClick = { currentPageIndex = idx },
+                            label = { Text(labelText, fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF38BDF8),
+                                selectedLabelColor = Color(0xFF0F172A),
+                                containerColor = Color(0xFF1E293B),
+                                labelColor = Color(0xFF94A3B8)
+                            )
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(onClick = onCancel) {
+                    Text("取消", color = Color(0xFF94A3B8), fontSize = 13.sp)
+                }
+            }
+        }
+
         // ==================== 上半屏 (42%)：可缩放原图 + 可点击 OCR 识别框 ====================
         Box(
             modifier = Modifier
@@ -113,33 +153,20 @@ fun ConfirmPolicyScreen(
                 )
             }
 
-            Row(
+            // 悬浮在原图下方的操作提示条
+            Box(
                 modifier = Modifier
+                    .align(Alignment.BottomStart)
                     .fillMaxWidth()
                     .background(Color.Black.copy(alpha = 0.65f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 12.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "💡 点击绿框填入【${activeFieldKey.label}】",
-                    color = Color.White,
+                    text = "💡 当前核对【${activeFieldKey.label}】：可直接点击图上绿框一键填入",
+                    color = Color(0xFFF1F5F9),
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(1f)
+                    maxLines = 1
                 )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
-                ) {
-                    pageBitmaps.indices.forEach { idx ->
-                        val labelText = pageLabels.getOrNull(idx) ?: "第${idx + 1}页"
-                        FilterChip(
-                            selected = currentPageIndex == idx,
-                            onClick = { currentPageIndex = idx },
-                            label = { Text(labelText, fontSize = 10.sp) }
-                        )
-                    }
-                }
             }
         }
 
@@ -163,9 +190,6 @@ fun ConfirmPolicyScreen(
                     fontSize = 16.sp,
                     color = Color(0xFF0F172A)
                 )
-                TextButton(onClick = onCancel) {
-                    Text("取消", color = Color(0xFF64748B))
-                }
             }
 
             PolicyFieldKey.entries.forEach { key ->

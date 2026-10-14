@@ -56,7 +56,7 @@ class SpatialRuleExtractor {
         val productName = extractProductName(blocks)
         val sumInsured = extractAmount(blocks, listOf("基本保险金额", "基本保额", "保险金额", "保额", "保障金额", "有效保额", "基准保额"), isSumInsured = true)
         val effectiveDate = extractEffectiveDate(blocks)
-        val annualPremium = extractAmount(blocks, listOf("保费合计", "保险费合计", "年交保费", "年缴保费", "首期保费", "期交保费", "期缴保费", "合计保费", "首期保险费", "实交保费", "保险费", "保费"), isSumInsured = false)
+        val annualPremium = extractAmount(blocks, listOf("保费合计", "保险费合计", "本期保险费合计", "期交保险费", "年交保费", "年缴保费", "首期保费", "期缴保费", "合计保费", "首期保险费", "实交保费", "保险费", "保费"), isSumInsured = false)
 
         return DraftPolicy(
             pdfSandboxPath = pdfSandboxPath,
@@ -94,7 +94,7 @@ class SpatialRuleExtractor {
     }
 
     private fun extractPolicyNo(blocks: List<OcrBlock>): ExtractedField {
-        val anchors = listOf("保险单号", "保单编号", "保单号码", "合同编号", "合同号码", "保险合同编号", "保单号", "合同号")
+        val anchors = listOf("保险合同号码", "合同号码", "保险单号", "保单编号", "保单号码", "合同编号", "保险合同编号", "保单号", "合同号")
         for (block in blocks) {
             val matchedAnchor = anchors.firstOrNull { block.text.contains(it) } ?: continue
             
@@ -161,30 +161,64 @@ class SpatialRuleExtractor {
             // 1. 同行内提取
             val after = block.text.substringAfter(matchedAnchor).replace(Regex("""^[:：\s]+"""), "").trim()
             if (after.length in 4..35 && isLikelyProductName(after)) {
-                return ExtractedField(after, ConfidenceLevel.HIGH, block.id, block.pageIndex)
+                return assembleFullProductName(after, block, blocks)
             }
 
             // 2. 空间邻居提取（表格下行或右列）
             val neighbors = findSpatialNeighbors(block, blocks)
             val target = neighbors.firstOrNull { cand ->
-                cand.text.length in 4..35 && isLikelyProductName(cand.text)
+                cand.text.length in 4..40 && isLikelyProductName(cand.text)
             }
             if (target != null) {
-                return ExtractedField(target.text.trim(), ConfidenceLevel.HIGH, target.id, target.pageIndex)
+                return assembleFullProductName(target.text.trim(), target, blocks)
             }
         }
 
-        // 3. 全局检索首张保单页中最像险种名称的文本（排除公司名、合同总称与条款字样）
+        // 3. 全局检索保单首页中最像险种名称的文本
         val globalMatch = blocks.filter { it.pageIndex == 0 }.firstOrNull { b ->
-            b.text.length in 5..35 && isLikelyProductName(b.text) &&
+            b.text.length in 5..40 && isLikelyProductName(b.text) &&
                     !b.text.contains("公司") && !b.text.contains("条款") &&
                     !b.text.contains("全国") && !b.text.contains("客户")
         }
         return if (globalMatch != null) {
-            ExtractedField(globalMatch.text.trim(), ConfidenceLevel.MEDIUM, globalMatch.id, globalMatch.pageIndex)
+            assembleFullProductName(globalMatch.text.trim(), globalMatch, blocks)
         } else {
             ExtractedField()
         }
+    }
+
+    /**
+     * 智能组装完整产品名称：
+     * 1. 修复常见 OCR 错别字（如“复屋”->“复星”，“呈海”->“星海”）
+     * 2. 自动检测并拼接下方跨行的分红/计划类型（如“（分红型）（计划一）”）
+     */
+    private fun assembleFullProductName(rawName: String, primaryBlock: OcrBlock, allBlocks: List<OcrBlock>): ExtractedField {
+        var corrected = rawName
+            .replace("复屋", "复星")
+            .replace("呈海", "星海")
+            .replace("呈期", "星期")
+
+        // 检查主险名称下方是否存在换行补充描述（如“（分红型）（计划一）”）
+        val rPrimary = primaryBlock.normRect
+        val nextLine = allBlocks.filter { it.pageIndex == primaryBlock.pageIndex && it.id != primaryBlock.id }
+            .firstOrNull { cand ->
+                val rCand = cand.normRect
+                val dy = rCand.top - rPrimary.bottom
+                val dxLeft = abs(rCand.left - rPrimary.left)
+                // 紧挨下方，且水平对齐或轻微缩进
+                dy in -0.005f..0.045f && dxLeft <= 0.15f &&
+                        (cand.text.startsWith("(") || cand.text.startsWith("（") ||
+                                cand.text.contains("分红") || cand.text.contains("计划") || cand.text.contains("万能"))
+            }
+
+        if (nextLine != null) {
+            val subText = nextLine.text.trim()
+            if (!corrected.contains(subText)) {
+                corrected += subText
+            }
+        }
+
+        return ExtractedField(corrected, ConfidenceLevel.HIGH, primaryBlock.id, primaryBlock.pageIndex)
     }
 
     private fun isLikelyProductName(text: String): Boolean {
@@ -198,17 +232,27 @@ class SpatialRuleExtractor {
 
     private fun extractAmount(blocks: List<OcrBlock>, anchors: List<String>, isSumInsured: Boolean): ExtractedField {
         for (block in blocks) {
-            val matchedAnchor = anchors.firstOrNull { block.text.contains(it) } ?: continue
+            // 归一化文本（去掉括号干扰，使“(基本)保险金额”能精准匹配“基本保险金额”）
+            val normalizedBlockText = block.text.replace(Regex("""[（）()\s]"""), "")
+            val matchedAnchor = anchors.firstOrNull {
+                block.text.contains(it) || normalizedBlockText.contains(it.replace(Regex("""[（）()\s]"""), ""))
+            } ?: continue
+
             val candidates = listOf(block) + findSpatialNeighbors(block, blocks)
             for (cand in candidates) {
                 val textToSearch = if (cand.id == block.id) cand.text.substringAfter(matchedAnchor) else cand.text
-                val match = moneyRegex.find(textToSearch) ?: continue
+
+                // 核心修复：部分 OCR 会将小数点识别为 '|'、'/' 或 ','（例如 "7,576|50元" 或 "7.576|50"）
+                val normalizedCandText = textToSearch
+                    .replace(Regex("""(?<=\d)[|/\\Il](?=\d{2}(?:元|万|$))"""), ".")
+
+                val match = moneyRegex.find(normalizedCandText) ?: continue
                 val rawNumStr = match.groupValues[1].replace(",", "")
                 val unit = match.groupValues[2]
                 val num = rawNumStr.toDoubleOrNull() ?: continue
 
                 if (isSumInsured && num < 100 && !unit.contains("万")) continue
-                if (!isSumInsured && (num <= 0 || num > 2_000_000)) continue
+                if (!isSumInsured && (num <= 0 || num > 5_000_000)) continue
 
                 val finalAmount = if (unit.contains("万")) num * 10000.0 else num
                 val formatted = if (finalAmount % 1.0 == 0.0) finalAmount.toLong().toString() else "%.2f".format(finalAmount)
@@ -245,6 +289,9 @@ class SpatialRuleExtractor {
         return fallbackDate ?: ExtractedField()
     }
 
+    /**
+     * 高精度空间几何邻居检索（同时支持水平同行邻居与表格垂直列对齐）
+     */
     private fun findSpatialNeighbors(anchor: OcrBlock, allBlocks: List<OcrBlock>): List<OcrBlock> {
         val rKey = anchor.normRect
         val hKey = max(rKey.height(), 0.01f)
@@ -257,17 +304,21 @@ class SpatialRuleExtractor {
                 val dyCenter = abs(rCand.centerY() - rKey.centerY())
                 val dxRight = rCand.left - rKey.right
 
-                // 同行右侧邻居
-                val isRightNeighbor = dxRight >= -0.02f && dxRight <= 0.55f && dyCenter <= 0.8f * hKey
+                // 1. 同行右侧邻居（Key-Value 键值对，例如 “投保人：曾治钞”）
+                val isRightNeighbor = dxRight >= -0.02f && dxRight <= 0.60f && dyCenter <= 0.85f * hKey
 
-                // 垂直下方邻居（表格列对齐）
+                // 2. 垂直下方邻居（表格列单元格，例如 “(基本)保险金额” 下方的 “7,576.50元”）
                 val dyBottom = rCand.top - rKey.bottom
                 val dxCenter = abs(rCand.centerX() - rKey.centerX())
-                val isBottomNeighbor = dyBottom >= -0.01f && dyBottom <= 3.0f * hKey && dxCenter <= max(wKey, 0.20f)
+                val horizontalOverlap = minOf(rCand.right, rKey.right) - maxOf(rCand.left, rKey.left)
+
+                // 宽松表格对齐：垂直距离允许在 0.18f (约280px) 内，且水平有重叠或中心偏差不超过列宽
+                val isTableColumnNeighbor = dyBottom >= -0.015f && dyBottom <= 0.18f &&
+                        (horizontalOverlap > -0.02f || dxCenter <= max(wKey, 0.16f))
 
                 when {
                     isRightNeighbor -> cand to (dxRight + 2.5f * dyCenter)
-                    isBottomNeighbor -> cand to (dyBottom + 1.8f * dxCenter + 0.1f)
+                    isTableColumnNeighbor -> cand to (dyBottom + 2.0f * dxCenter)
                     else -> null
                 }
             }

@@ -1,7 +1,22 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
+}
+
+fun getGitCommitHash(): String {
+    return try {
+        val stdout = ByteArrayOutputStream()
+        project.exec {
+            commandLine = listOf("git", "rev-parse", "--short", "HEAD")
+            standardOutput = stdout
+        }
+        stdout.toString().trim()
+    } catch (e: Exception) {
+        "dev"
+    }
 }
 
 android {
@@ -14,6 +29,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0-mvp"
+
+        val gitHash = getGitCommitHash()
+        buildConfigField("String", "GIT_COMMIT_HASH", "\"$gitHash\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -61,6 +79,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {

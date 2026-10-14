@@ -130,6 +130,8 @@ fun HomeScreen(
             // 3. 保单列表或空状态引导
             if (filteredPolicies.isEmpty()) {
                 EmptyPolicyGuide(onImportPdfClick = onImportPdfClick)
+                Spacer(modifier = Modifier.height(24.dp))
+                AppVersionFooter()
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -142,9 +144,35 @@ fun HomeScreen(
                             onDelete = { onDeletePolicy(policy) }
                         )
                     }
+                    item {
+                        AppVersionFooter()
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AppVersionFooter() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "版本号：v1.0.0 (${com.example.policyvault.BuildConfig.GIT_COMMIT_HASH})",
+            fontSize = 12.sp,
+            color = Color(0xFF64748B),
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = "🔒 纯端侧离线安全存储 · 零网络权限",
+            fontSize = 11.sp,
+            color = Color(0xFF94A3B8)
+        )
     }
 }
 
