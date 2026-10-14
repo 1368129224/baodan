@@ -42,11 +42,12 @@ fun ConfirmPolicyScreen(
     pageBitmaps: List<Bitmap>,
     ocrBlocks: List<OcrBlock>,
     initialDraft: DraftPolicy,
+    pageLabels: List<String> = emptyList(),
     onCancel: () -> Unit,
     onConfirmSave: (DraftPolicy) -> Unit
 ) {
     var draft by remember { mutableStateOf(initialDraft) }
-    var activeFieldKey by remember { mutableStateOf(PolicyFieldKey.POLICY_NO) }
+    var activeFieldKey by remember { mutableStateOf(PolicyFieldKey.APPLICANT) }
     var currentPageIndex by remember { mutableIntStateOf(0) }
 
     val activeField = remember(draft, activeFieldKey) {
@@ -115,22 +116,27 @@ fun ConfirmPolicyScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "💡 点击图上绿框可一键填入【${activeFieldKey.label}】",
+                    text = "💡 点击绿框填入【${activeFieldKey.label}】",
                     color = Color.White,
-                    fontSize = 12.sp
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f)
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
                     pageBitmaps.indices.forEach { idx ->
+                        val labelText = pageLabels.getOrNull(idx) ?: "第${idx + 1}页"
                         FilterChip(
                             selected = currentPageIndex == idx,
                             onClick = { currentPageIndex = idx },
-                            label = { Text("第${idx + 1}页", fontSize = 11.sp) }
+                            label = { Text(labelText, fontSize = 10.sp) }
                         )
                     }
                 }

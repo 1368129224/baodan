@@ -1,76 +1,105 @@
 package com.example.policyvault.domain.ocr
 
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.RectF
 import com.example.policyvault.data.model.OcrBlock
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class OcrEngineWrapper {
 
-    /**
-     * 批量对前 3 页 Bitmap 执行离线 OCR，输出带归一化坐标的 OcrBlock 列表
-     */
-    suspend fun recognizePages(bitmaps: List<Bitmap>): List<OcrBlock> = withContext(Dispatchers.Default) {
-        val allBlocks = mutableListOf<OcrBlock>()
-        var globalId = 0
-
-        bitmaps.forEachIndexed { pageIndex, bitmap ->
-            val width = bitmap.width.toFloat()
-            val height = bitmap.height.toFloat()
-
-            // 调用离线 OCR 的检测与识别接口
-            val rawResults = runNativeRapidOcr(bitmap)
-
-            for (item in rawResults) {
-                val cleanedText = item.text.trim()
-                if (cleanedText.isEmpty()) continue
-
-                // 取四点外接矩形并归一化到 [0.0f, 1.0f]
-                val left = (item.xs.minOrNull() ?: 0f).coerceIn(0f, width) / width
-                val top = (item.ys.minOrNull() ?: 0f).coerceIn(0f, height) / height
-                val right = (item.xs.maxOrNull() ?: width).coerceIn(0f, width) / width
-                val bottom = (item.ys.maxOrNull() ?: height).coerceIn(0f, height) / height
-
-                allBlocks.add(
-                    OcrBlock(
-                        id = globalId++,
-                        pageIndex = pageIndex,
-                        text = cleanedText,
-                        normRect = RectF(left, top, right, bottom),
-                        confidence = item.score
-                    )
-                )
-            }
-        }
-        allBlocks
+    private val recognizer by lazy {
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     }
 
-    private data class NativeOcrItem(
-        val xs: List<Float>,
-        val ys: List<Float>,
-        val text: String,
-        val score: Float
-    )
+    /**
+     * 对单张 Bitmap 执行端侧离线 OCR 识别
+     */
+    suspend fun recognizePage(bitmap: Bitmap, pageIndex: Int, startId: Int): List<OcrBlock> = withContext(Dispatchers.Default) {
+        val width = bitmap.width.toFloat()
+        val height = bitmap.height.toFloat()
+        if (width <= 0f || height <= 0f) return@withContext emptyList()
 
-    private fun runNativeRapidOcr(bitmap: Bitmap): List<NativeOcrItem> {
-        // 离线 OCR 提取实现；在 MVP 阶段包含典型保单锚点与数据，供端侧交互联调
-        return listOf(
-            NativeOcrItem(listOf(120f, 380f), listOf(140f, 185f), "中国平安人寿保险股份有限公司", 0.99f),
-            NativeOcrItem(listOf(120f, 260f), listOf(220f, 260f), "保单号", 0.98f),
-            NativeOcrItem(listOf(280f, 620f), listOf(220f, 260f), "P880020260918231", 0.99f),
-            NativeOcrItem(listOf(120f, 260f), listOf(300f, 340f), "投保人", 0.98f),
-            NativeOcrItem(listOf(280f, 420f), listOf(300f, 340f), "张明远", 0.97f),
-            NativeOcrItem(listOf(520f, 660f), listOf(300f, 340f), "被保险人", 0.98f),
-            NativeOcrItem(listOf(680f, 820f), listOf(300f, 340f), "张明远", 0.97f),
-            NativeOcrItem(listOf(120f, 260f), listOf(400f, 440f), "险种名称", 0.96f),
-            NativeOcrItem(listOf(120f, 540f), listOf(460f, 505f), "平安e生保长期百万医疗保险", 0.95f),
-            NativeOcrItem(listOf(580f, 720f), listOf(400f, 440f), "基本保额", 0.97f),
-            NativeOcrItem(listOf(580f, 760f), listOf(460f, 505f), "200万元", 0.99f),
-            NativeOcrItem(listOf(120f, 280f), listOf(560f, 600f), "生效日期", 0.98f),
-            NativeOcrItem(listOf(300f, 560f), listOf(560f, 600f), "2026年03月15日", 0.99f),
-            NativeOcrItem(listOf(120f, 280f), listOf(640f, 680f), "保费合计", 0.98f),
-            NativeOcrItem(listOf(300f, 480f), listOf(640f, 680f), "1280.00元", 0.99f)
-        )
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        val visionText = suspendCancellableCoroutine { continuation ->
+            recognizer.process(inputImage)
+                .addOnSuccessListener { result ->
+                    if (continuation.isActive) continuation.resume(result)
+                }
+                .addOnFailureListener { exception ->
+                    if (continuation.isActive) continuation.resumeWithException(exception)
+                }
+        }
+
+        val blocks = mutableListOf<OcrBlock>()
+        var currentId = startId
+
+        fun toNormRect(box: Rect?): RectF {
+            return if (box != null) {
+                val l = (box.left.toFloat() / width).coerceIn(0f, 1f)
+                val t = (box.top.toFloat() / height).coerceIn(0f, 1f)
+                val r = (box.right.toFloat() / width).coerceIn(0f, 1f)
+                val b = (box.bottom.toFloat() / height).coerceIn(0f, 1f)
+                RectF(l, t, maxOf(l + 0.005f, r), maxOf(t + 0.005f, b))
+            } else {
+                RectF(0f, 0f, 1f, 1f)
+            }
+        }
+
+        for (textBlock in visionText.textBlocks) {
+            for (line in textBlock.lines) {
+                val lineText = line.text.trim()
+                if (lineText.isEmpty()) continue
+
+                // 如果该行包含多个被空格或列分隔的元素（例如表格同行“投保人   张明远”）：
+                // 同时保留各元素独立块（便于高亮框点选与空间邻近对齐）与完整行文本
+                if (line.elements.size > 1) {
+                    // 加入整行（便于直接在行内做正则匹配）
+                    blocks.add(
+                        OcrBlock(
+                            id = currentId++,
+                            pageIndex = pageIndex,
+                            text = lineText,
+                            normRect = toNormRect(line.boundingBox),
+                            confidence = line.confidence
+                        )
+                    )
+                    // 加入细粒度元素块（便于用户在分屏画布精准点选）
+                    for (element in line.elements) {
+                        val elText = element.text.trim()
+                        if (elText.isNotEmpty() && elText != ":" && elText != "：" && elText != lineText) {
+                            blocks.add(
+                                OcrBlock(
+                                    id = currentId++,
+                                    pageIndex = pageIndex,
+                                    text = elText,
+                                    normRect = toNormRect(element.boundingBox),
+                                    confidence = element.confidence
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    blocks.add(
+                        OcrBlock(
+                            id = currentId++,
+                            pageIndex = pageIndex,
+                            text = lineText,
+                            normRect = toNormRect(line.boundingBox),
+                            confidence = line.confidence
+                        )
+                    )
+                }
+            }
+        }
+
+        blocks
     }
 }

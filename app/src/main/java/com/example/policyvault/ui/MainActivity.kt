@@ -32,6 +32,7 @@ import com.example.policyvault.domain.pdf.PdfProcessor
 import com.example.policyvault.ui.confirm.ConfirmPolicyScreen
 import com.example.policyvault.ui.home.HomeScreen
 import kotlinx.coroutines.launch
+import java.io.File
 
 sealed interface AppScreenState {
     data object Home : AppScreenState
@@ -39,7 +40,8 @@ sealed interface AppScreenState {
     data class Confirm(
         val pageBitmaps: List<Bitmap>,
         val ocrBlocks: List<OcrBlock>,
-        val draft: DraftPolicy
+        val draft: DraftPolicy,
+        val pageLabels: List<String>
     ) : AppScreenState
 }
 
@@ -58,10 +60,8 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                // 订阅本地 Room 数据库中的全部保单列表
                 val policies by database.policyDao().observeAllPolicies().collectAsState(initial = emptyList())
 
-                // 注册系统原生 PDF 文件选择器 (无需申请存储权限)
                 val pdfPickerLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.OpenDocument()
                 ) { uri: Uri? ->
@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
                             pageBitmaps = state.pageBitmaps,
                             ocrBlocks = state.ocrBlocks,
                             initialDraft = state.draft,
+                            pageLabels = state.pageLabels,
                             onCancel = { screenState = AppScreenState.Home },
                             onConfirmSave = { confirmedDraft ->
                                 saveConfirmedPolicy(confirmedDraft)
@@ -110,9 +111,6 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
     }
 
-    /**
-     * 拦截从微信或系统文件管理器“用其他应用打开 / 分享”传入的 PDF Uri
-     */
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {
@@ -128,39 +126,126 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 核心端侧流水线：PDF 落盘与前 3 页光栅化 -> 离线 OCR 推理 -> 空间几何锚点提取 -> 进入分屏确认页
+     * 智能核心端侧流水线：
+     * 1. 扫描 PDF 页面，检测文本中是否包含“投保人”，定位真实的保单首页（避开封面和无用说明页）
+     * 2. 截取保单首页及后续明细页并渲染高清 Bitmap
+     * 3. 运行端侧离线 ML Kit OCR
+     * 4. 空间几何锚点提取保单 8 大核心字段
      */
     private fun startPdfImportPipeline(uri: Uri) {
         lifecycleScope.launch {
             try {
-                screenState = AppScreenState.Processing("正在截取保单前 3 页并生成高清预览...")
-                val renderResult = pdfProcessor.ingestAndRenderPdf(uri)
+                screenState = AppScreenState.Processing("正在导入保单文档...")
+                val (sandboxPdfFile, totalPages) = pdfProcessor.prepareSandboxPdf(uri)
 
-                screenState = AppScreenState.Processing("正在运行端侧离线 OCR 识别保单文字...")
-                val ocrBlocks = ocrEngine.recognizePages(renderResult.pageBitmaps)
+                // 核心策略：寻找包含“投保人”的目标保单首页
+                screenState = AppScreenState.Processing("正在定位保单核心凭证页（查找投保人信息）...")
+                val maxScan = minOf(totalPages, 10)
+                var targetPageIndex = -1
+                val scannedBitmaps = mutableMapOf<Int, Bitmap>()
+                val scannedPageBlocks = mutableMapOf<Int, List<OcrBlock>>()
+
+                for (p in 0 until maxScan) {
+                    screenState = AppScreenState.Processing("正在扫描第 ${p + 1} 页文字...")
+                    val bmp = pdfProcessor.renderPage(sandboxPdfFile, p)
+                    scannedBitmaps[p] = bmp
+                    val blocks = ocrEngine.recognizePage(bmp, pageIndex = p, startId = p * 1000)
+                    scannedPageBlocks[p] = blocks
+
+                    // 关键要求：必须先找到“投保人”，才认为是保单首页
+                    if (blocks.any { it.text.contains("投保人") }) {
+                        targetPageIndex = p
+                        break
+                    }
+                }
+
+                // 若前 10 页未找到“投保人”，退化查找“被保险人”或“保单号”
+                if (targetPageIndex == -1) {
+                    for (p in 0 until maxScan) {
+                        val blocks = scannedPageBlocks[p] ?: continue
+                        if (blocks.any { it.text.contains("被保险人") || it.text.contains("被保人") || it.text.contains("保单号") || it.text.contains("合同编号") }) {
+                            targetPageIndex = p
+                            break
+                        }
+                    }
+                }
+                if (targetPageIndex == -1) {
+                    targetPageIndex = 0
+                }
+
+                // 扫描或加载后续紧邻的一页（通常为险种与保费明细表）
+                val nextPageIndex = targetPageIndex + 1
+                if (nextPageIndex < totalPages && !scannedBitmaps.containsKey(nextPageIndex)) {
+                    screenState = AppScreenState.Processing("正在解析保单明细页...")
+                    val nextBmp = pdfProcessor.renderPage(sandboxPdfFile, nextPageIndex)
+                    scannedBitmaps[nextPageIndex] = nextBmp
+                    scannedPageBlocks[nextPageIndex] = ocrEngine.recognizePage(nextBmp, nextPageIndex, nextPageIndex * 1000)
+                }
+
+                // 确定确认页要展示的页面列表：保单首页排在第 1 位
+                val selectedPdfIndices = mutableListOf<Int>()
+                selectedPdfIndices.add(targetPageIndex)
+                if (targetPageIndex + 1 < totalPages && !selectedPdfIndices.contains(targetPageIndex + 1)) {
+                    selectedPdfIndices.add(targetPageIndex + 1)
+                }
+                // 如果保单首页不是原件第 1 页，把封面也放在末尾作为可选参考
+                if (targetPageIndex > 0 && !selectedPdfIndices.contains(0) && scannedBitmaps.containsKey(0)) {
+                    selectedPdfIndices.add(0)
+                }
+
+                val uiBitmaps = mutableListOf<Bitmap>()
+                val uiImageFiles = mutableListOf<File>()
+                val uiOcrBlocks = mutableListOf<OcrBlock>()
+                val pageLabels = mutableListOf<String>()
+                var blockCounter = 0
+
+                selectedPdfIndices.forEachIndexed { uiIdx, originalIdx ->
+                    val bmp = scannedBitmaps[originalIdx]!!
+                    uiBitmaps.add(bmp)
+
+                    val imgFile = File(sandboxPdfFile.parentFile, "page_ui_$uiIdx.jpg")
+                    pdfProcessor.saveBitmap(bmp, imgFile)
+                    uiImageFiles.add(imgFile)
+
+                    val label = when {
+                        originalIdx == targetPageIndex -> "保单首页 (P${originalIdx + 1})"
+                        originalIdx == targetPageIndex + 1 -> "明细页 (P${originalIdx + 1})"
+                        originalIdx == 0 -> "封面 (P1)"
+                        else -> "P${originalIdx + 1}"
+                    }
+                    pageLabels.add(label)
+
+                    val rawBlocks = scannedPageBlocks[originalIdx] ?: emptyList()
+                    rawBlocks.forEach { b ->
+                        uiOcrBlocks.add(
+                            b.copy(
+                                id = blockCounter++,
+                                pageIndex = uiIdx
+                            )
+                        )
+                    }
+                }
 
                 screenState = AppScreenState.Processing("正在提取保单 8 大核心字段...")
                 val draft = ruleExtractor.extract(
-                    blocks = ocrBlocks,
-                    pdfSandboxPath = renderResult.sandboxPdfFile.absolutePath,
-                    previewImagePaths = renderResult.savedImageFiles.map { it.absolutePath }
+                    blocks = uiOcrBlocks,
+                    pdfSandboxPath = sandboxPdfFile.absolutePath,
+                    previewImagePaths = uiImageFiles.map { it.absolutePath }
                 )
 
                 screenState = AppScreenState.Confirm(
-                    pageBitmaps = renderResult.pageBitmaps,
-                    ocrBlocks = ocrBlocks,
-                    draft = draft
+                    pageBitmaps = uiBitmaps,
+                    ocrBlocks = uiOcrBlocks,
+                    draft = draft,
+                    pageLabels = pageLabels
                 )
             } catch (e: Exception) {
                 screenState = AppScreenState.Home
-                Toast.makeText(this@MainActivity, "保单导入失败: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "保单解析失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    /**
-     * 将用户确认后的草稿写入本地 Room 数据库，并切回首页列表
-     */
     private fun saveConfirmedPolicy(draft: DraftPolicy) {
         lifecycleScope.launch {
             val entity = PolicyEntity(
