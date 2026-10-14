@@ -365,7 +365,7 @@ private fun EmptyPolicyGuide(onImportPdfClick: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(28.dp),
-            horizontalAlignment = Alignment.CenterVertically
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
                 imageVector = Icons.Default.Description,
