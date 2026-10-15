@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -45,6 +47,8 @@ jobs:
           mkdir -p build_output
           cp app/build/outputs/apk/release/*.apk build_output/PolicyVault-arm64-v8a-release.apk
           ls -lh build_output/
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -53,24 +57,25 @@ jobs:
           path: build_output/PolicyVault-arm64-v8a-release.apk
           if-no-files-found: error
 
-      - name: Create GitHub Release
+      - name: Update GitHub Latest Release
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0-mvp
-          name: "PolicyVault MVP v1.0.0 (arm64-v8a)"
+          tag_name: latest
+          name: "PolicyVault 最新版本 (${{ env.COMMIT_HASH }})"
           body: |
-            ## 离线保单管家 MVP v1.0.0
+            ## 保单管家最新版本 (${{ env.COMMIT_HASH }})
 
             ### 核心特性
-            - 🔒 **纯离线零网络**：无 INTERNET 权限，保护个人与家庭保单隐私
+            - 🔄 **应用内在线更新**：首页左下角支持一键检查 GitHub Releases 并下载自动安装
+            - 🔒 **本地端侧隐私安全**：保单核心 OCR 识别与数据持久化 100% 在本地运行
             - 📄 **电子保单 PDF 解析**：支持微信/文件管理器“用其他应用打开/分享”直接导入
-            - ⚡ **arm64-v8a 架构优化**：针对 64 位 ARM 优化，APK 体积更轻便
+            - ⚡ **arm64-v8a 架构优化**：针对 64 位 ARM 优化，APK 轻量敏捷
             - 🖥️ **分屏联动确认**：原图识别框与表单双向联动定位，零打字纠错
             - 👨‍👩‍👧‍👦 **家庭保单看板**：按被保险人分类筛选、年缴保费汇总统计
 
             ### 下载安装
-            - 下载下方附件 `PolicyVault-arm64-v8a-release.apk` 即可在安卓设备上直接安装体验。
+            - 下载下方附件 `PolicyVault-arm64-v8a-release.apk` 即可在安卓设备上直接安装更新。
           files: build_output/PolicyVault-arm64-v8a-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

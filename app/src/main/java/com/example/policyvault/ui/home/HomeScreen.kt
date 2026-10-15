@@ -1,26 +1,34 @@
 package com.example.policyvault.ui.home
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.policyvault.BuildConfig
 import com.example.policyvault.data.local.PolicyEntity
+import com.example.policyvault.domain.updater.AppUpdater
+import com.example.policyvault.domain.updater.UpdateInfo
+import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -30,6 +38,17 @@ fun HomeScreen(
     onImportPdfClick: () -> Unit,
     onDeletePolicy: (PolicyEntity) -> Unit
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val updater = remember { AppUpdater(context) }
+
+    var isCheckingUpdate by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableIntStateOf(0) }
+
     // 提取所有不重复的“被保险人”姓名，生成家庭成员筛选标签
     val familyMembers = remember(policies) {
         listOf("全部") + policies.map { it.insured.ifBlank { "未命名" } }.distinct()
@@ -47,6 +66,45 @@ fun HomeScreen(
         filteredPolicies.sumOf { it.annualPremium }
     }
 
+    fun triggerCheckUpdate() {
+        if (isCheckingUpdate || isDownloading) return
+        isCheckingUpdate = true
+        coroutineScope.launch {
+            try {
+                val info = updater.checkUpdate()
+                updateInfo = info
+                if (info.hasUpdate) {
+                    showUpdateDialog = true
+                } else {
+                    Toast.makeText(context, "已是最新版本 (v1.0.0-${BuildConfig.GIT_COMMIT_HASH})", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "检查更新失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            } finally {
+                isCheckingUpdate = false
+            }
+        }
+    }
+
+    fun startDownloadAndInstall(info: UpdateInfo) {
+        showUpdateDialog = false
+        isDownloading = true
+        downloadProgress = 0
+        coroutineScope.launch {
+            try {
+                val apkFile = updater.downloadApk(info.downloadUrl) { progress ->
+                    downloadProgress = progress
+                }
+                isDownloading = false
+                Toast.makeText(context, "下载完成，正在调起安装...", Toast.LENGTH_SHORT).show()
+                updater.installApk(apkFile)
+            } catch (e: Exception) {
+                isDownloading = false
+                Toast.makeText(context, "更新下载失败: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -59,7 +117,7 @@ fun HomeScreen(
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("离线保单管家", fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                        Text("保单管家", fontWeight = FontWeight.Bold, fontSize = 19.sp)
                     }
                 },
                 actions = {
@@ -69,7 +127,7 @@ fun HomeScreen(
                         modifier = Modifier.padding(end = 12.dp)
                     ) {
                         Text(
-                            text = "🔒 纯本地零联网",
+                            text = "🔒 纯本地安全存储",
                             color = Color(0xFF15803D),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -80,96 +138,221 @@ fun HomeScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
             )
         },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onImportPdfClick,
-                containerColor = Color(0xFF2563EB),
-                contentColor = Color.White,
-                icon = { Icon(Icons.Default.Add, contentDescription = "导入保单") },
-                text = { Text("导入保单 PDF", fontWeight = FontWeight.SemiBold) }
-            )
-        },
         containerColor = Color(0xFFF1F5F9)
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
         ) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Spacer(modifier = Modifier.height(12.dp))
 
-            // 1. 顶部家庭保单统计总览卡片
-            SummaryDashboardCard(
-                policyCount = filteredPolicies.size,
-                totalPremium = totalAnnualPremium,
-                selectedMember = selectedMember
-            )
+                // 1. 顶部家庭保单统计总览卡片
+                SummaryDashboardCard(
+                    policyCount = filteredPolicies.size,
+                    totalPremium = totalAnnualPremium,
+                    selectedMember = selectedMember
+                )
 
-            Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-            // 2. 家庭成员（被保险人）横向筛选栏
-            if (policies.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    familyMembers.forEach { member ->
-                        FilterChip(
-                            selected = selectedMember == member,
-                            onClick = { selectedMember = member },
-                            label = { Text(member, fontSize = 13.sp) }
-                        )
+                // 2. 家庭成员横向标签栏
+                if (familyMembers.size > 2) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        familyMembers.forEach { member ->
+                            FilterChip(
+                                selected = selectedMember == member,
+                                onClick = { selectedMember = member },
+                                label = { Text(member, fontSize = 13.sp) }
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // 3. 保单列表或空状态引导
+                if (filteredPolicies.isEmpty()) {
+                    EmptyPolicyGuide(onImportPdfClick = onImportPdfClick)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    AppVersionFooter(
+                        onCheckUpdateClick = { triggerCheckUpdate() },
+                        isChecking = isCheckingUpdate
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(bottom = 96.dp)
+                    ) {
+                        items(filteredPolicies, key = { it.id }) { policy ->
+                            PolicyItemCard(
+                                policy = policy,
+                                onDelete = { onDeletePolicy(policy) }
+                            )
+                        }
+                        item {
+                            AppVersionFooter(
+                                onCheckUpdateClick = { triggerCheckUpdate() },
+                                isChecking = isCheckingUpdate
+                            )
+                        }
                     }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // 3. 保单列表或空状态引导
-            if (filteredPolicies.isEmpty()) {
-                EmptyPolicyGuide(onImportPdfClick = onImportPdfClick)
-                Spacer(modifier = Modifier.height(24.dp))
-                AppVersionFooter()
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 88.dp)
+            // 底部操作区：左下角【检测更新】按钮 + 右下角【导入保单】按钮
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 20.dp)
+            ) {
+                // 左下角：检测新版本按钮
+                FilledTonalButton(
+                    onClick = { triggerCheckUpdate() },
+                    modifier = Modifier.align(Alignment.BottomStart),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = Color.White,
+                        contentColor = Color(0xFF0F172A)
+                    ),
+                    elevation = ButtonDefaults.filledTonalButtonElevation(defaultElevation = 2.dp)
                 ) {
-                    items(filteredPolicies, key = { it.id }) { policy ->
-                        PolicyItemCard(
-                            policy = policy,
-                            onDelete = { onDeletePolicy(policy) }
+                    if (isCheckingUpdate) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFF2563EB)
                         )
-                    }
-                    item {
-                        AppVersionFooter()
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("检查中...", fontSize = 13.sp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.SystemUpdate,
+                            contentDescription = "检查更新",
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFF2563EB)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("检查更新", fontSize = 13.sp, fontWeight = FontWeight.Medium)
                     }
                 }
+
+                // 右下角：导入保单 PDF 浮动按钮
+                ExtendedFloatingActionButton(
+                    onClick = onImportPdfClick,
+                    containerColor = Color(0xFF2563EB),
+                    contentColor = Color.White,
+                    icon = { Icon(Icons.Default.Add, contentDescription = "导入保单") },
+                    text = { Text("导入保单 PDF", fontWeight = FontWeight.SemiBold) },
+                    modifier = Modifier.align(Alignment.BottomEnd)
+                )
+            }
+
+            // 下载进度弹窗
+            if (isDownloading) {
+                AlertDialog(
+                    onDismissRequest = { /* 下载中不可关闭 */ },
+                    confirmButton = {},
+                    title = { Text("正在下载更新包") },
+                    text = {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            LinearProgressIndicator(
+                                progress = { downloadProgress / 100f },
+                                modifier = Modifier.fillMaxWidth().height(8.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "正在从 GitHub 下载最新版本: $downloadProgress%",
+                                fontSize = 13.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        }
+                    }
+                )
+            }
+
+            // 发现新版本更新弹窗
+            if (showUpdateDialog && updateInfo != null) {
+                val info = updateInfo!!
+                val sizeText = if (info.apkSize > 0) " (${"%.1f".format(info.apkSize / (1024f * 1024f))} MB)" else ""
+                AlertDialog(
+                    onDismissRequest = { showUpdateDialog = false },
+                    title = { Text("发现新版本") },
+                    text = {
+                        Column {
+                            Text(
+                                text = "版本: ${info.latestVersion}$sizeText",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF2563EB)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = info.releaseNotes.ifBlank { "包含性能优化与修复。" },
+                                fontSize = 13.sp,
+                                color = Color(0xFF334155),
+                                lineHeight = 18.sp
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { startDownloadAndInstall(info) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                        ) {
+                            Text("立即下载并安装")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showUpdateDialog = false }) {
+                            Text("稍后")
+                        }
+                    }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun AppVersionFooter() {
+private fun AppVersionFooter(
+    onCheckUpdateClick: () -> Unit,
+    isChecking: Boolean
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            text = "版本号：v1.0.0 (${com.example.policyvault.BuildConfig.GIT_COMMIT_HASH})",
-            fontSize = 12.sp,
-            color = Color(0xFF64748B),
-            fontWeight = FontWeight.Medium
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "版本号：v1.0.0 (${BuildConfig.GIT_COMMIT_HASH})",
+                fontSize = 12.sp,
+                color = Color(0xFF64748B),
+                fontWeight = FontWeight.Medium
+            )
+        }
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "🔒 纯端侧离线安全存储 · 零网络权限",
+            text = "🔒 电子保单 100% 本地端侧解析 · 隐私无泄漏",
             fontSize = 11.sp,
             color = Color(0xFF94A3B8)
         )
@@ -185,56 +368,62 @@ private fun SummaryDashboardCard(
     totalPremium: Double,
     selectedMember: String
 ) {
-    val decimalFormat = remember { DecimalFormat("#,##0.00") }
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B))
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = if (selectedMember == "全部") "全家总保费支出预估" else "${selectedMember}的年缴保费",
+                color = Color(0xFF94A3B8),
+                fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
                 Text(
-                    text = if (selectedMember == "全部") "家庭有效保单" else "${selectedMember} 的保单",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 13.sp
+                    text = "¥",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 3.dp)
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = "$policyCount",
-                        color = Color.White,
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "份",
-                        color = Color(0xFFCBD5E1),
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                }
+                Spacer(modifier = Modifier.width(4.dp))
+                val formattedMoney = DecimalFormat("#,##0.00").format(totalPremium)
+                Text(
+                    text = formattedMoney,
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "/ 年",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
             }
 
-            Column(horizontalAlignment = Alignment.End) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = Color(0xFF334155), thickness = 0.8.dp)
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 Text(
-                    text = "年缴总保费预估",
+                    text = "已纳入管理保单",
                     color = Color(0xFF94A3B8),
-                    fontSize = 13.sp
+                    fontSize = 12.sp
                 )
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "¥ ${decimalFormat.format(totalPremium)}",
+                    text = "$policyCount 份",
                     color = Color(0xFF38BDF8),
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
         }
@@ -242,15 +431,13 @@ private fun SummaryDashboardCard(
 }
 
 /**
- * 单张已导入保单展示卡片
+ * 保单列表项卡片
  */
 @Composable
 private fun PolicyItemCard(
     policy: PolicyEntity,
     onDelete: () -> Unit
 ) {
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -258,122 +445,95 @@ private fun PolicyItemCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            // 第一行：承保保司标签 + 保单号 + 删除按钮
+            // 第一行：承保公司与被保人标签
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        color = Color(0xFFEFF6FF),
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Text(
-                            text = policy.insurer.ifBlank { "未知保司" },
-                            color = Color(0xFF1D4ED8),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "单号: ${policy.policyNo.ifBlank { "--" }}",
-                        color = Color(0xFF64748B),
-                        fontSize = 12.sp
-                    )
-                }
-
-                IconButton(
-                    onClick = { showDeleteConfirm = true },
-                    modifier = Modifier.size(28.dp)
+                Text(
+                    text = policy.insurer.ifBlank { "保险公司" },
+                    fontSize = 13.sp,
+                    color = Color(0xFF64748B),
+                    fontWeight = FontWeight.Medium
+                )
+                Surface(
+                    color = Color(0xFFEFF6FF),
+                    shape = RoundedCornerShape(4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = "删除保单",
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(18.dp)
+                    Text(
+                        text = "被保人: ${policy.insured.ifBlank { "--" }}",
+                        color = Color(0xFF1D4ED8),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // 第二行：主险产品名称
+            // 第二行：主险全称
             Text(
-                text = policy.productName.ifBlank { "未命名保险产品" },
+                text = policy.productName.ifBlank { "保险产品" },
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
                 color = Color(0xFF0F172A),
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold
+                maxLines = 2
             )
 
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 第三行：三列核心指标（被保险人 | 基本保额 | 年缴保费）
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFF8FAFC), RoundedCornerShape(8.dp))
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                MetricColumn(label = "被保险人", value = policy.insured.ifBlank { "--" })
-                MetricColumn(label = "基本保额", value = formatSumInsured(policy.sumInsured))
-                MetricColumn(label = "年缴保费", value = "¥${policy.annualPremium.toInt()}/年")
-            }
-
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 第四行：投保人与生效日期
+            // 第三行：保单编号与保额/保费摘要
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "投保人：${policy.applicant.ifBlank { "--" }}",
-                    color = Color(0xFF64748B),
-                    fontSize = 12.sp
-                )
-                Text(
-                    text = "生效日：${policy.effectiveDate.ifBlank { "--" }}",
-                    color = Color(0xFF64748B),
-                    fontSize = 12.sp
-                )
+                Column {
+                    Text(
+                        text = "保单号: ${policy.policyNo.ifBlank { "--" }}",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Text(
+                        text = "基本保额: ${formatSumInsured(policy.sumInsured)}",
+                        fontSize = 11.sp,
+                        color = Color(0xFF64748B)
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "¥${DecimalFormat("#,##0.00").format(policy.annualPremium)}",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFEA580C)
+                        )
+                        Text(
+                            text = "生效: ${policy.effectiveDate.ifBlank { "--" }}",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "删除保单",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
         }
-    }
-
-    if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("确认移除该保单？") },
-            text = { Text("移除后将删除本地保单记录「${policy.productName}」。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDeleteConfirm = false
-                        onDelete()
-                    }
-                ) {
-                    Text("确认删除", color = Color(0xFFEF4444))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun MetricColumn(label: String, value: String) {
-    Column {
-        Text(text = label, color = Color(0xFF64748B), fontSize = 11.sp)
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(text = value, color = Color(0xFF0F172A), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
